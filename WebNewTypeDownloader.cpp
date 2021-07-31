@@ -16,6 +16,8 @@
 #include <QJsonObject>
 #include <QFile>
 #include <QDir>
+#include <QThreadPool>
+#include <QRunnable>
 #include <QDebug>
 
 const QString PREFIX = "https://comic.webnewtype.com";
@@ -70,26 +72,20 @@ UrlList getUrls(const QJsonDocument &doc)
 	return urls;
 }
 
-void downLoad(const UrlList &urls, const QString& series, const QString& chapter)
+class downLoader: public QRunnable
 {
-	QDir dir(qApp->applicationDirPath());
-	dir.mkdir(series);
-	dir.cd(series);
-	dir.mkdir(chapter);
-	dir.cd(chapter);
-	
+public:
+	downLoader(const QString& url, const QString& fileName): m_url(url), m_fileName(fileName)
+	{}
 
-	fmt::print("Start download...\n");
-	int count = 1;
-	
-	for(const auto &url : urls)
+	void run() override
 	{
-		fmt::print("Downloading {}...\n",url.toStdString());
-		
+		fmt::print("Downloading {}...\n", m_url.toStdString());
+
 		QNetworkAccessManager manager;
 		QNetworkRequest request;
-		request.setUrl(QUrl(url));
-		
+		request.setUrl(QUrl(m_url));
+
 		QEventLoop eventLoop;
 		QObject::connect(&manager, SIGNAL(finished(QNetworkReply*)), &eventLoop, SLOT(quit()));
 		QNetworkReply* reply = manager.get(request);
@@ -97,47 +93,65 @@ void downLoad(const UrlList &urls, const QString& series, const QString& chapter
 
 		if (reply->error() != QNetworkReply::NoError)
 		{
-			fmt::print("Download Failed at {}\n",url.toStdString());
+			fmt::print("Download Failed at {}\n", m_url.toStdString());
 		}
 
-		QString fileName;
-		fileName = dir.absolutePath() + "/" + QString::number(count)+".jpg";
-		//qDebug() << fileName;
-		QFile file(fileName);
-		if(!file.open(QIODevice::WriteOnly))
+		QFile file(m_fileName);
+		if (!file.open(QIODevice::WriteOnly))
 		{
-			fmt::print("Failed to write {}", fileName.toStdString());
+			fmt::print("Failed to write {}", m_fileName.toStdString());
 		}
 		file.write(reply->readAll());
 		file.close();
 
-		count++;
+		fmt::print("{} Download Completed!\n", m_fileName.toStdString());
 	}
 
-	fmt::print("Download Completed!\n");
-}
+private:
+	QString m_url;
+	QString m_fileName;
+};
 
 int main(int argc, char* argv[])
 {
 	QCoreApplication app(argc, argv);
 
-	while (1)
+	QString series, chapter;
+	QJsonDocument retJson;
+
+	QTextStream qin(stdin);
+	fmt::printf("Enter series: ");
+	qin >> series;
+	fmt::printf("Enter Chapter: ");
+	qin >> chapter;
+
+	// Create ouput Dir
+	QDir dir(qApp->applicationDirPath());
+	dir.mkdir(series);
+	dir.cd(series);
+	dir.mkdir(chapter);
+	dir.cd(chapter);
+
+	// Get Urls
+	retJson = getJson(series, chapter);
+	UrlList urls = getUrls(retJson);
+
+
+	QString pathPre = dir.absolutePath() + "/";
+
+	// Start Downloading
+	QThreadPool threadpool;
+	threadpool.setMaxThreadCount(4);
+
+	int count = 0;
+	for (const auto& url : urls)
 	{
-		QString series, chapter;
-		QJsonDocument retJson;
-
-		QTextStream qin(stdin);
-		fmt::printf("Enter series: ");
-		qin >> series;
-		fmt::printf("Enter Chapter: ");
-		qin >> chapter;
-
-		retJson = getJson(series, chapter);
-
-		UrlList urls = getUrls(retJson);
-
-		downLoad(urls, series, chapter);
+		QString fileName = pathPre + QString::number(++count) + ".jpg";
+		threadpool.start(new downLoader(url, fileName));
 	}
+
+	threadpool.waitForDone();
+	fmt::print("All Downloading Completed!\n");
 	
 	return app.exec();
 }
